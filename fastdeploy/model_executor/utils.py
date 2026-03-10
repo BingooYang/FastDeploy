@@ -554,6 +554,10 @@ def rename_offline_ckpt_suffix_to_fd_suffix(
     return fn
 
 
+def has_flashinfer():
+    return importlib.util.find_spec("flashinfer") is not None
+
+
 @cache
 def get_sm_version():
     if paddle.cuda.is_available():
@@ -615,8 +619,6 @@ def reconstruct_memory(model):
         paddle.device.cuda.empty_cache()
         _reload_model(model)
 
-def has_flashinfer():
-    return importlib.util.find_spec("flashinfer") is not None
 
 def need_memory_reconstruction(fd_config):
     _need_memory_reconstruction_archs = ["DeepseekV3ForCausalLM", "DeepseekV32ForCausalLM"]
@@ -627,3 +629,6 @@ def need_memory_reconstruction(fd_config):
         return True
     else:
         return False
+
+def has_flashinfer():
+    return importlib.util.find_spec("flashinfer") is not None
