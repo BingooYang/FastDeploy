@@ -25,6 +25,7 @@ from paddle import nn
 from paddleformers.transformers import PretrainedModel
 from paddleformers.utils.log import logger
 
+from fastdeploy import envs
 from fastdeploy.config import FDConfig
 from fastdeploy.model_executor.forward_meta import ForwardMeta
 from fastdeploy.model_executor.graph_optimization.decorator import (
@@ -159,11 +160,14 @@ class Glm4Moe(nn.Layer):
             default_initializer=paddle.nn.initializer.Constant(0),
         )
 
+        # triton path：shared experts 权重融合进路由专家槽位，FusedMoE 需多分配 n_shared 个槽
+        # 非 triton path：cutlass kernel 只支持路由专家，保持原始 num_experts
+        _use_triton_fused = self.n_shared_experts > 0 and envs.FD_MOE_BACKEND.lower() == "triton"
         self.experts = FusedMoE(
             fd_config,
             renormalize=self.norm_topk_prob,
             moe_intermediate_size=fd_config.model_config.moe_intermediate_size,
-            num_experts=fd_config.model_config.n_routed_experts,
+            num_experts=fd_config.model_config.n_routed_experts + (self.n_shared_experts if _use_triton_fused else 0),
             top_k=fd_config.model_config.num_experts_per_tok,
             topk_method="noaux_tc",
             topk_group=fd_config.model_config.topk_group,
@@ -172,6 +176,7 @@ class Glm4Moe(nn.Layer):
             layer_idx=layer_id,
             gate_correction_bias=self.gate.e_score_correction_bias,
             weight_key_map=weight_key_map,
+            n_shared_experts=self.n_shared_experts if _use_triton_fused else 0,
         )
 
         if self.n_shared_experts > 0:
@@ -183,11 +188,27 @@ class Glm4Moe(nn.Layer):
                 prefix=f"{prefix}.shared_experts",
             )
 
+    def process_weights_after_loading(self):
+        """
+        权重全部加载完毕后：若使用 triton backend，把 shared_experts 权重融合进
+        self.experts 的尾部并释放；否则保留 shared_experts，forward 时单独跑。
+        """
+        if self.n_shared_experts > 0 and hasattr(self, "shared_experts"):
+            if envs.FD_MOE_BACKEND.lower() == "triton":
+                # triton path：融合共享专家权重进路由专家槽位
+                qm = getattr(self.experts, "quant_method", None)
+                if qm is not None and hasattr(qm, "process_weights_after_loading"):
+                    qm.process_weights_after_loading(self.experts)
+                self.experts.merge_shared_expert_weights(self.shared_experts)
+                # 释放 shared_experts 参数，节省显存
+                del self.shared_experts
+
     def forward(self, x, forward_meta: ForwardMeta = None):
         out = self.experts(x, self.gate, forward_meta)
-        if self.n_shared_experts > 0:
-            shared_experts_out = self.shared_experts(x)
-            out = out + shared_experts_out
+        # triton path：shared experts 已融合进 self.experts，此处 shared_experts 已被删除
+        # 非 triton path：shared_experts 仍存在，单独 forward 后相加
+        if self.n_shared_experts > 0 and hasattr(self, "shared_experts"):
+            out = out + self.shared_experts(x)
         return out
 
 
@@ -264,6 +285,7 @@ class Glm4MoeDecoderLayer(nn.Layer):
         super().__init__()
 
         layer_id = int(prefix.split(sep=".")[-1])
+        self.layer_id = layer_id
         self.self_attn = Glm4MoeAttention(
             fd_config=fd_config,
             layer_id=layer_id,
@@ -308,13 +330,11 @@ class Glm4MoeDecoderLayer(nn.Layer):
         hidden_states, residual = self.input_layernorm(
             hidden_states, residual_input=residual, forward_meta=forward_meta
         )
-
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             forward_meta=forward_meta,
         )
 
-        # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         hidden_states = self.mlp(hidden_states, forward_meta)
@@ -534,7 +554,6 @@ class Glm4MoeForCausalLM(ModelForCasualLM):
     ):
         ids_remove_padding = inputs["ids_remove_padding"]
         hidden_states = self.model(ids_remove_padding=ids_remove_padding, forward_meta=forward_meta)
-
         return hidden_states
 
     def clear_grpah_opt_backend(self):
