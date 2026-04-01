@@ -316,8 +316,7 @@ __device__ __forceinline__ void DeviceSamplingFromProb(
     }
   }
 
-
-#if CUDART_VERSION >= 12090
+#if CUDART_VERSION >= 13010
   int max_valid_index = BlockReduce<int, BLOCK_THREADS, REDUCE_ALGORITHM>(
                             temp_storage->block_prim.reduce_int)
                             .Reduce(valid_index, ::cuda::maximum());
@@ -639,9 +638,9 @@ __device__ __forceinline__ float GetMaxValue(float* in_data,
 #pragma unroll
     for (uint32_t j = 0; j < VEC_SIZE; ++j) {
       in_data_[j] = in_data_vec[j];
-    }  
+    }
 #if defined(PADDLE_WITH_COREX) || defined(PADDLE_WITH_CUSTOM_DEVICE_METAX_GPU)
-#if CUDART_VERSION >= 12090
+#if CUDART_VERSION >= 13010
     max_val = max(max_val,
                   BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(
                       temp_storage.block_prim.reduce)
@@ -653,7 +652,7 @@ __device__ __forceinline__ float GetMaxValue(float* in_data,
                       .Reduce(in_data_, cub::Max()));
 #endif
 #else
-#if CUDART_VERSION >= 12090
+#if CUDART_VERSION >= 13010
     max_val = max(max_val,
                   BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(
                       temp_storage.block_prim.reduce)
@@ -857,7 +856,7 @@ __global__ void TopKRenormProbKernel(DType* probs,
 #endif
         __syncthreads();
       }
-#if CUDART_VERSION >= 12090
+#if CUDART_VERSION >= 13010
       min_gt_low = BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(
                        temp_storage.block_prim.reduce)
                        .Reduce(min_gt_low, ::cuda::minimum<>());
@@ -867,7 +866,7 @@ __global__ void TopKRenormProbKernel(DType* probs,
                        .Reduce(min_gt_low, cub::Min());
 #endif
       __syncthreads();
-#if CUDART_VERSION >= 12090
+#if CUDART_VERSION >= 13010
       max_le_high = BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(
                         temp_storage.block_prim.reduce)
                         .Reduce(max_le_high, ::cuda::maximum());

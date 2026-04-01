@@ -335,7 +335,7 @@ __launch_bounds__(TPB) __global__
   }
   const int64_t thread_row_offset = globalIdx * num_cols;
 
-#if CUDART_VERSION >= 12090
+#if CUDART_VERSION >= 13010
   ::cuda::std::plus sum;
 #else
   cub::Sum sum;
@@ -348,8 +348,9 @@ __launch_bounds__(TPB) __global__
     threadData = max(static_cast<float>(input[idx]), threadData);
   }
 
-#if CUDART_VERSION >= 12090
-  const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, ::cuda::maximum());
+#if CUDART_VERSION >= 13010
+  const float maxElem =
+      BlockReduce(tmpStorage).Reduce(threadData, ::cuda::maximum());
 #else
   const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, cub::Max());
 #endif
@@ -383,8 +384,9 @@ __launch_bounds__(TPB) __global__
     threadData = max(static_cast<float>(T(val)), threadData);
   }
 
-#if CUDART_VERSION >= 12090
-  const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, ::cuda::maximum());
+#if CUDART_VERSION >= 13010
+  const float maxElem =
+      BlockReduce(tmpStorage).Reduce(threadData, ::cuda::maximum());
 #else
   const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, cub::Max());
 #endif
@@ -419,7 +421,7 @@ __launch_bounds__(TPB) __global__ void moe_softmax(const T* input,
   }
   const int64_t thread_row_offset = globalIdx * num_cols;
 
-#if CUDART_VERSION >= 12090
+#if CUDART_VERSION >= 13010
   ::cuda::std::plus sum;
 #else
   cub::Sum sum;
@@ -431,8 +433,9 @@ __launch_bounds__(TPB) __global__ void moe_softmax(const T* input,
     threadData = max(static_cast<float>(input[idx]), threadData);
   }
 
-#if CUDART_VERSION >= 12090
-  const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, ::cuda::maximum());
+#if CUDART_VERSION >= 13010
+  const float maxElem =
+      BlockReduce(tmpStorage).Reduce(threadData, ::cuda::maximum());
 #else
   const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, cub::Max());
 #endif
@@ -631,7 +634,7 @@ __launch_bounds__(TPB) __global__
   const int64_t thread_row_offset = globalIdx * num_experts;
   const int64_t idx = thread_row_offset + threadIdx.x;
 
-#if CUDART_VERSION >= 12090
+#if CUDART_VERSION >= 13010
   ::cuda::std::plus sum;
 #else
   cub::Sum sum;
@@ -640,8 +643,9 @@ __launch_bounds__(TPB) __global__
   float threadData =
       (threadIdx.x < num_experts) ? static_cast<float>(input[idx]) : (-FLT_MAX);
 
-#if CUDART_VERSION >= 12090
-  const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, ::cuda::maximum());
+#if CUDART_VERSION >= 13010
+  const float maxElem =
+      BlockReduce(tmpStorage).Reduce(threadData, ::cuda::maximum());
 #else
   const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, cub::Max());
 #endif

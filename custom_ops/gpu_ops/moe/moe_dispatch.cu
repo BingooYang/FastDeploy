@@ -47,8 +47,9 @@ __global__ void compute_max_tokens_from_prefix_sum_kernel(
   }
 
   // Use CUB BlockReduce to find maximum value across all threads
-#if CUDART_VERSION >= 12090
-  int64_t block_max = BlockReduceT(temp_storage).Reduce(local_max, ::cuda::maximum());
+#if CUDART_VERSION >= 13010
+  int64_t block_max =
+      BlockReduceT(temp_storage).Reduce(local_max, ::cuda::maximum());
 #else
   int64_t block_max = BlockReduceT(temp_storage).Reduce(local_max, cub::Max());
 #endif
