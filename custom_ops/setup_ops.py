@@ -174,6 +174,12 @@ def get_gencode_flags(archs):
                 "-gencode",
                 f"arch=compute_{arch_code},code=sm_{arch_code}",
             ]
+        elif 103 == cc_val:
+            arch_code = "103a"
+            flags += [
+                "-gencode",
+                f"arch=compute_{arch_code},code=sm_{arch_code}",
+            ]
         else:
             flags += ["-gencode", f"arch=compute_{cc_val},code=sm_{cc_val}"]
     return flags
@@ -446,7 +452,7 @@ elif paddle.is_compiled_with_cuda():
                     "gpu_ops/cutlass_kernels/w8a8/c3x/scaled_mm_sm90_int8.cu",
                     "gpu_ops/cutlass_kernels/w8a8/c3x/scaled_mm_azp_sm90_int8.cu",
                 ]
-            elif cc == 100 and nvcc_version >= 12.9:  # Blackwell SM100 specifics
+            elif cc >= 100 and nvcc_version >= 12.9:  # Blackwell SM100 specifics
                 print("SM100 (Blackwell): Applying SM100 configurations.")
                 nvcc_compile_args += [
                     # The gencode for 100a is added in get_gencode_flags
