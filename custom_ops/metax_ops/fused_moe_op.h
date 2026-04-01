@@ -398,7 +398,11 @@ __launch_bounds__(TPB) __global__
   }
   const int64_t thread_row_offset = globalIdx * num_cols;
 
+#if CUDART_VERSION >= 12090
+  ::cuda::std::plus sum;
+#else
   cub::Sum sum;
+#endif
   float threadData(-FLT_MAX);
 
   for (int ii = threadIdx.x; ii < num_cols; ii += TPB) {
@@ -468,7 +472,11 @@ __launch_bounds__(TPB) __global__ void moe_softmax(const T* input,
   }
   const int64_t thread_row_offset = globalIdx * num_cols;
 
+#if CUDART_VERSION >= 12090
+  ::cuda::std::plus sum;
+#else
   cub::Sum sum;
+#endif
   float threadData(-FLT_MAX);
 
   for (int ii = threadIdx.x; ii < num_cols; ii += TPB) {
@@ -672,7 +680,11 @@ __launch_bounds__(TPB) __global__
   const int64_t thread_row_offset = globalIdx * num_experts;
   const int64_t idx = thread_row_offset + threadIdx.x;
 
+#if CUDART_VERSION >= 12090
+  ::cuda::std::plus sum;
+#else
   cub::Sum sum;
+#endif
 
   float threadData =
       (threadIdx.x < num_experts) ? static_cast<float>(input[idx]) : (-FLT_MAX);
