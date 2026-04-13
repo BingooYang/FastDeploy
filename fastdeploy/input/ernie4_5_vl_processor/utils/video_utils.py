@@ -18,7 +18,7 @@ import io
 import os
 from tempfile import NamedTemporaryFile as ntf
 
-import decord
+import numpy as np
 
 try:
     # moviepy 1.0
@@ -35,14 +35,24 @@ def is_gif(data: bytes) -> bool:
     return data[:6] in (b"GIF87a", b"GIF89a")
 
 
-class VideoReaderWrapper(decord.VideoReader):
-    """
-    Solving memory leak bug
+class _NumpyFrame:
+    """Wrapper so that frame[idx].asnumpy() keeps working with paddlecodec."""
 
-    https://github.com/dmlc/decord/issues/208
-    """
+    def __init__(self, array):
+        self._array = array
+
+    def asnumpy(self):
+        return self._array
+
+
+class VideoReaderWrapper:
+    """paddlecodec VideoDecoder wrapper with GIF support."""
 
     def __init__(self, video_path, *args, **kwargs):
+        import sys
+
+        import paddle
+
         with ntf(delete=True, suffix=".gif") as gif_file:
             gif_input = None
             self.original_file = None
@@ -70,13 +80,33 @@ class VideoReaderWrapper(decord.VideoReader):
                 video_path = mp4_file.name
                 self.original_file = video_path
 
-            super().__init__(video_path, *args, **kwargs)
-            self.seek(0)
+            if "torchcodec" in sys.modules:
+                del sys.modules["torchcodec"]
+            paddle.enable_compat(scope={"torchcodec"})
+            from torchcodec.decoders import VideoDecoder
+
+            num_threads = kwargs.get("num_threads", 0)
+            self._decoder = VideoDecoder(
+                video_path,
+                seek_mode="exact",
+                num_ffmpeg_threads=num_threads,
+                device="cpu",
+            )
+            paddle.disable_compat()
+
+    def __len__(self):
+        return self._decoder.metadata.num_frames
 
     def __getitem__(self, key):
-        frames = super().__getitem__(key)
-        self.seek(0)
-        return frames
+        if isinstance(key, (int, np.integer)):
+            frame = self._decoder.get_frames_at(indices=[int(key)]).data[0]
+            return _NumpyFrame(frame.numpy())
+        indices = list(key) if not isinstance(key, list) else key
+        frames = self._decoder.get_frames_at(indices=indices).data
+        return _NumpyFrame(frames.numpy())
+
+    def get_avg_fps(self):
+        return self._decoder.metadata.average_fps
 
     def __del__(self):
         if self.original_file and os.path.exists(self.original_file):

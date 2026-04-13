@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared video utilities: VideoReaderWrapper, read_video_decord, and sample_frames."""
+"""Shared video utilities: VideoReaderWrapper, read_video_paddlecodec, and sample_frames."""
 
 import io
 import math
@@ -27,7 +27,7 @@ from fastdeploy.utils import data_processor_logger
 
 __all__ = [
     "VideoReaderWrapper",
-    "read_video_decord",
+    "read_video_paddlecodec",
     "sample_frames",
     "sample_frames_qwen",
     "sample_frames_paddleocr",
@@ -44,14 +44,23 @@ def _is_gif(data: bytes) -> bool:
     return data[:6] in (b"GIF87a", b"GIF89a")
 
 
-class VideoReaderWrapper:
-    """decord.VideoReader wrapper that fixes a memory leak and adds GIF support.
+class _NumpyFrame:
+    """Wrapper so that frame[idx].asnumpy() keeps working with paddlecodec."""
 
-    Reference: https://github.com/dmlc/decord/issues/208
-    """
+    def __init__(self, array):
+        self._array = array
+
+    def asnumpy(self):
+        return self._array
+
+
+class VideoReaderWrapper:
+    """paddlecodec VideoDecoder wrapper with GIF support."""
 
     def __init__(self, video_path, *args, **kwargs):
-        import decord
+        import sys
+
+        import paddle
 
         try:
             # moviepy 1.0
@@ -91,22 +100,33 @@ class VideoReaderWrapper:
                 video_path = mp4_path
                 self.original_file = video_path  # temp mp4, cleaned up in __del__
 
-            self._reader = decord.VideoReader(video_path, *args, **kwargs)
-            self._reader.seek(0)
+            if "torchcodec" in sys.modules:
+                del sys.modules["torchcodec"]
+            paddle.enable_compat(scope={"torchcodec"})
+            from torchcodec.decoders import VideoDecoder
+
+            num_threads = kwargs.get("num_threads", 0)
+            self._decoder = VideoDecoder(
+                video_path,
+                seek_mode="exact",
+                num_ffmpeg_threads=num_threads,
+                device="cpu",
+            )
+            paddle.disable_compat()
 
     def __len__(self):
-        return len(self._reader)
+        return self._decoder.metadata.num_frames
 
     def __getitem__(self, key):
-        frames = self._reader[key]
-        self._reader.seek(0)
-        return frames
+        if isinstance(key, (int, np.integer)):
+            frame = self._decoder.get_frames_at(indices=[int(key)]).data[0]
+            return _NumpyFrame(frame.numpy())
+        indices = list(key) if not isinstance(key, list) else key
+        frames = self._decoder.get_frames_at(indices=indices).data
+        return _NumpyFrame(frames.numpy())
 
     def get_avg_fps(self):
-        return self._reader.get_avg_fps()
-
-    def seek(self, pos):
-        return self._reader.seek(pos)
+        return self._decoder.metadata.average_fps
 
     def __del__(self):
         original_file = getattr(self, "original_file", None)
@@ -118,11 +138,11 @@ class VideoReaderWrapper:
 
 
 # ---------------------------------------------------------------------------
-# read_video_decord
+# read_video_paddlecodec
 # ---------------------------------------------------------------------------
 
 
-def read_video_decord(video_path, save_to_disk: bool = False):
+def read_video_paddlecodec(video_path, save_to_disk: bool = False):
     """Load a video file and return (video_reader, video_meta, video_path).
 
     video_meta contains keys: "fps", "duration", "num_of_frame".
