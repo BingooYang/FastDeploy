@@ -35,8 +35,8 @@ GIF89_HEADER = b"GIF89a" + b"\x00" * 10
 NOT_GIF = b"NOTGIF" + b"\x00" * 10
 
 
-def _make_mock_decoder(num_frames=100, fps=25.0):
-    """Return a mock that mimics paddlecodec VideoDecoder."""
+def _make_mock_reader(num_frames=100, fps=25.0):
+    """Return a mock that mimics both decord.VideoReader and paddlecodec VideoDecoder."""
     metadata = MagicMock()
     metadata.num_frames = num_frames
     metadata.average_fps = fps
@@ -47,10 +47,18 @@ def _make_mock_decoder(num_frames=100, fps=25.0):
     frames_result = MagicMock()
     frames_result.data = [frame_data]
 
-    decoder = MagicMock()
-    decoder.metadata = metadata
-    decoder.get_frames_at = MagicMock(return_value=frames_result)
-    return decoder
+    reader = MagicMock()
+    # decord-style attributes
+    reader.__len__ = MagicMock(return_value=num_frames)
+    reader.get_avg_fps = MagicMock(return_value=fps)
+    reader.seek = MagicMock(return_value=None)
+    frame = MagicMock()
+    frame.asnumpy = MagicMock(return_value=np.zeros((480, 640, 3), dtype=np.uint8))
+    reader.__getitem__ = MagicMock(return_value=frame)
+    # paddlecodec-style attributes
+    reader.metadata = metadata
+    reader.get_frames_at = MagicMock(return_value=frames_result)
+    return reader
 
 
 def _patch_modules(mock_decoder):
@@ -102,7 +110,7 @@ class TestVideoReaderWrapper(unittest.TestCase):
         from fastdeploy.input.video_utils import VideoReaderWrapper
 
         if mock_decoder is None:
-            mock_decoder = _make_mock_decoder()
+            mock_decoder = _make_mock_reader()
 
         with _patch_modules(mock_decoder):
             wrapper = VideoReaderWrapper(video_path)
@@ -111,12 +119,12 @@ class TestVideoReaderWrapper(unittest.TestCase):
         return wrapper
 
     def test_len(self):
-        decoder = _make_mock_decoder(num_frames=42)
+        decoder = _make_mock_reader(num_frames=42)
         wrapper = self._make_wrapper("/fake/video.mp4", decoder)
         self.assertEqual(len(wrapper), 42)
 
     def test_getitem(self):
-        decoder = _make_mock_decoder()
+        decoder = _make_mock_reader()
         wrapper = self._make_wrapper("/fake/video.mp4", decoder)
         frame = wrapper[0]
         self.assertTrue(hasattr(frame, "asnumpy"))
@@ -124,7 +132,7 @@ class TestVideoReaderWrapper(unittest.TestCase):
         self.assertEqual(arr.shape, (480, 640, 3))
 
     def test_get_avg_fps(self):
-        decoder = _make_mock_decoder(fps=30.0)
+        decoder = _make_mock_reader(fps=30.0)
         wrapper = self._make_wrapper("/fake/video.mp4", decoder)
         self.assertEqual(wrapper.get_avg_fps(), 30.0)
 
@@ -134,7 +142,7 @@ class TestVideoReaderWrapper(unittest.TestCase):
 
         wrapper = object.__new__(VideoReaderWrapper)
         wrapper.original_file = None
-        wrapper._decoder = _make_mock_decoder()
+        wrapper._decoder = _make_mock_reader()
         # Should not raise
         wrapper.__del__()
 
@@ -150,7 +158,7 @@ class TestVideoReaderWrapper(unittest.TestCase):
 
         wrapper = object.__new__(VideoReaderWrapper)
         wrapper.original_file = tmp_path
-        wrapper._decoder = _make_mock_decoder()
+        wrapper._decoder = _make_mock_reader()
         wrapper.__del__()
         self.assertFalse(os.path.exists(tmp_path))
 
@@ -158,7 +166,7 @@ class TestVideoReaderWrapper(unittest.TestCase):
         """Passing a non-GIF string path must NOT set original_file (bug fix)."""
         from fastdeploy.input.video_utils import VideoReaderWrapper
 
-        mock_decoder = _make_mock_decoder()
+        mock_decoder = _make_mock_reader()
 
         with _patch_modules(mock_decoder):
             wrapper = VideoReaderWrapper("/fake/video.mp4")
@@ -169,7 +177,7 @@ class TestVideoReaderWrapper(unittest.TestCase):
         """Passing a BytesIO that is NOT a GIF must not set original_file."""
         from fastdeploy.input.video_utils import VideoReaderWrapper
 
-        mock_decoder = _make_mock_decoder()
+        mock_decoder = _make_mock_reader()
 
         bio = io.BytesIO(NOT_GIF)
         with _patch_modules(mock_decoder):

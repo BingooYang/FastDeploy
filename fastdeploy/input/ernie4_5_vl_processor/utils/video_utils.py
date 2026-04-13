@@ -82,17 +82,16 @@ class VideoReaderWrapper:
 
             if "torchcodec" in sys.modules:
                 del sys.modules["torchcodec"]
-            paddle.enable_compat(scope={"torchcodec"})
-            from torchcodec.decoders import VideoDecoder
+            with paddle.use_compat_guard(enable=True, scope={"torchcodec"}):
+                from torchcodec.decoders import VideoDecoder
 
-            num_threads = kwargs.get("num_threads", 0)
-            self._decoder = VideoDecoder(
-                video_path,
-                seek_mode="exact",
-                num_ffmpeg_threads=num_threads,
-                device="cpu",
-            )
-            paddle.disable_compat()
+                num_threads = kwargs.get("num_threads", 0)
+                self._decoder = VideoDecoder(
+                    video_path,
+                    seek_mode="exact",
+                    num_ffmpeg_threads=num_threads,
+                    device="cpu",
+                )
 
     def __len__(self):
         return self._decoder.metadata.num_frames
