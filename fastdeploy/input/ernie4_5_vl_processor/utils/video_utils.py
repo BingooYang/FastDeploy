@@ -19,7 +19,11 @@ import os
 from tempfile import NamedTemporaryFile as ntf
 
 import numpy as np
+import paddle
 
+from fastdeploy.utils import get_logger
+
+logger = get_logger("video_utils")
 try:
     # moviepy 1.0
     import moviepy.editor as mp
@@ -49,9 +53,6 @@ class VideoReaderWrapper:
     """paddlecodec VideoDecoder wrapper with GIF support."""
 
     def __init__(self, video_path, *args, **kwargs):
-        import sys
-
-        import paddle
 
         with ntf(delete=True, suffix=".gif") as gif_file:
             gif_input = None
@@ -80,17 +81,35 @@ class VideoReaderWrapper:
                 video_path = mp4_file.name
                 self.original_file = video_path
 
-            if "torchcodec" in sys.modules:
-                del sys.modules["torchcodec"]
             with paddle.use_compat_guard(enable=True, scope={"torchcodec"}):
-                from torchcodec.decoders import VideoDecoder
+                try:
+                    import sys
 
-                num_threads = kwargs.get("num_threads", 0)
+                    del sys.modules["torchcodec"]
+                    from torchcodec.decoders import VideoDecoder
+
+                    sys.modules["torchcodec"] = None
+                except (ImportError, RuntimeError) as e:
+                    logger.error(
+                        f"Failed to load 'torchcodec' backend via Paddle proxy.\n"
+                        f"  - Common Causes:\n"
+                        f"    1. Conflict with official 'torch' or 'torchcodec' packages.\n"
+                        f"    2. Missing FFmpeg libraries or System library mismatch (CXXABI).\n"
+                        f"  - Recommended Fix Steps:\n"
+                        f"    1. Install dependencies: `conda install ffmpeg -c conda-forge` or `apt-get update && apt-get install ffmpeg` \n"
+                        f"    2. Uninstall conflicts: `pip uninstall torchcodec paddlecodec -y`\n"
+                        f"    3. Reinstall packages: `pip install paddlecodec --force-reinstall`\n"
+                        f"  - If you encounter 'CXXABI' or 'libstdc++' errors, your system libraries might be outdated.\n"
+                        f"    Try prioritizing Conda libraries by running: `LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH python your_script.py`\n"
+                        f"  - Original Error: {e}"
+                    )
+                    raise
+                PADDLECODEC_NUM_THREADS = int(os.environ.get("PADDLECODEC_NUM_THREADS", 0))
                 self._decoder = VideoDecoder(
                     video_path,
                     seek_mode="exact",
-                    num_ffmpeg_threads=num_threads,
-                    device="cpu",
+                    num_ffmpeg_threads=PADDLECODEC_NUM_THREADS,
+                    device=kwargs.get("device", "cpu"),
                 )
 
     def __len__(self):
