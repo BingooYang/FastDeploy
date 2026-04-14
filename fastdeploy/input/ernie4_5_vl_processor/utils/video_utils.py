@@ -85,7 +85,6 @@ class VideoReaderWrapper:
                 try:
                     import sys
 
-                    del sys.modules["torchcodec"]
                     from torchcodec.decoders import VideoDecoder
 
                     sys.modules["torchcodec"] = None
