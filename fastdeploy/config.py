@@ -2104,7 +2104,10 @@ class FDConfig:
 
         if self.scheduler_config.max_num_batched_tokens is None:
             if int(envs.ENABLE_V1_KVCACHE_SCHEDULER):
-                self.scheduler_config.max_num_batched_tokens = 8192  # if set to max_model_len, it's easy to be OOM
+                if int(envs.FD_DISABLE_CHUNKED_PREFILL):
+                    self.scheduler_config.max_num_batched_tokens = self.model_config.max_model_len
+                else:
+                    self.scheduler_config.max_num_batched_tokens = 8192  # if set to max_model_len, it's easy to be OOM
             else:
                 if self.cache_config.enable_chunked_prefill:
                     self.scheduler_config.max_num_batched_tokens = 2048
@@ -2482,7 +2485,13 @@ class FDConfig:
             if paddle.is_compiled_with_xpu():
                 num_tokens = self.scheduler_config.max_num_batched_tokens
             else:
-                num_tokens = self.scheduler_config.max_num_seqs
+                # In MTP scenario, each sequence generates (num_speculative_tokens + 1) tokens per step
+                mtp_steps = (
+                    (getattr(self.speculative_config, "num_speculative_tokens", 0) + 1)
+                    if self.speculative_config is not None and self.speculative_config.method is not None
+                    else 1
+                )
+                num_tokens = self.scheduler_config.max_num_seqs * mtp_steps
         else:
             num_tokens = self.scheduler_config.max_num_batched_tokens
             if self.enable_mm_runtime and mm_max_tokens_per_item is not None:

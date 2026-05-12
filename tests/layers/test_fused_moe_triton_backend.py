@@ -23,8 +23,8 @@ import types
 import paddle
 import pytest
 
-if not hasattr(paddle, "compat"):
-    paddle.compat = types.SimpleNamespace(enable_torch_proxy=lambda scope=None: None)
+if not hasattr(paddle, "enable_compat"):
+    paddle.enable_compat = lambda scope=None: None
 if not hasattr(paddle.nn.functional, "swiglu"):
     paddle.nn.functional.swiglu = lambda x: x
 
@@ -911,6 +911,36 @@ class TestTritonBF16MoEMethod:
         layer = self._make_layer(hidden_size=8)
         method.create_weights(layer, model_format="torch")
         self._patch_bf16_kernel(monkeypatch)
+    def test_triton_weight_only_apply_noaux_tc_with_fd_enable_rl(self, fake_ops, monkeypatch):
+        quant_config = DummyQuantConfig(is_checkpoint_bf16=False)
+        layer = DummyLayer(quant_config)
+        layer.topk_method = "noaux_tc"
+        method = backend.TritonWeightOnlyMoEMethod(quant_config)
+        method.create_weights(layer, model_format="torch")
+
+        layer._up_weights = [
+            paddle.arange(layer.hidden_size * layer.moe_intermediate_size * 2, dtype="float32").reshape(
+                [layer.hidden_size, layer.moe_intermediate_size * 2]
+            )
+            for _ in range(layer.num_local_experts)
+        ]
+        layer._down_weights = [
+            paddle.arange(layer.moe_intermediate_size * layer.hidden_size, dtype="float32").reshape(
+                [layer.moe_intermediate_size, layer.hidden_size]
+            )
+            for _ in range(layer.num_local_experts)
+        ]
+        method.process_loaded_weights(layer, state_dict={})
+
+        kernel = DummyKernel()
+        monkeypatch.setattr(backend, "fused_moe_kernel_paddle", kernel, raising=False)
+
+        # Set FD_ENABLE_RL=True to trigger use_fused = False at line 313
+        # This should trigger gate_out.cast('float32') at line 315
+        monkeypatch.setattr(backend.fastdeploy.envs, "FD_ENABLE_RL", True)
+
+        x = paddle.randn([1, layer.hidden_size], dtype="float32")
+        gate = DummyGate(layer.num_local_experts)
 
         captured = {}
 
@@ -947,6 +977,50 @@ class TestTritonBF16MoEMethod:
         layer.topk_method = "aux"
         method.create_weights(layer, model_format="torch")
         self._patch_bf16_kernel(monkeypatch)
+        _ = method.apply(layer, x, gate, topk_ids_hookfunc=hook)
+        assert "topk_ids" in captured
+
+    def test_triton_weight_only_apply_noaux_tc_with_non_cuda(self, fake_ops, monkeypatch):
+        quant_config = DummyQuantConfig(is_checkpoint_bf16=False)
+        layer = DummyLayer(quant_config)
+        # Ensure topk_method is "noaux_tc" to enter the target branch
+        layer.topk_method = "noaux_tc"
+        method = backend.TritonWeightOnlyMoEMethod(quant_config)
+        method.create_weights(layer, model_format="torch")
+
+        layer._up_weights = [
+            paddle.arange(layer.hidden_size * layer.moe_intermediate_size * 2, dtype="float32").reshape(
+                [layer.hidden_size, layer.moe_intermediate_size * 2]
+            )
+            for _ in range(layer.num_local_experts)
+        ]
+        layer._down_weights = [
+            paddle.arange(layer.moe_intermediate_size * layer.hidden_size, dtype="float32").reshape(
+                [layer.moe_intermediate_size, layer.hidden_size]
+            )
+            for _ in range(layer.num_local_experts)
+        ]
+        method.process_loaded_weights(layer, state_dict={})
+
+        kernel = DummyKernel()
+        monkeypatch.setattr(backend, "fused_moe_kernel_paddle", kernel, raising=False)
+
+        # Mock current_platform.is_cuda() to return False to trigger use_fused = False at line 313
+        # This should trigger gate_out.cast("float32") at line 315
+        monkeypatch.setattr(backend, "current_platform", types.SimpleNamespace(is_cuda=lambda: False))
+
+        x = paddle.randn([2, layer.hidden_size], dtype="float32")
+        gate = DummyGate(layer.num_local_experts)
+
+        def fake_get_moe_scores(*args, **kwargs):
+            gate_out = args[0]
+            token_num = gate_out.shape[0]
+            top_k = args[3]
+            topk_ids = paddle.zeros([token_num, top_k], dtype="int64")
+            topk_weights = paddle.ones([token_num, top_k], dtype="float32")
+            return gate_out, topk_weights, topk_ids
+
+        monkeypatch.setattr(backend, "get_moe_scores", fake_get_moe_scores)
 
         captured = {}
 
@@ -991,3 +1065,7 @@ class TestTritonBF16MoEMethod:
         layer = self._make_layer()
         with pytest.raises(NotImplementedError):
             method.apply_ep_decode(layer, None, None)
+            captured["topk_ids"] = topk_ids
+
+        _ = method.apply(layer, x, gate, topk_ids_hookfunc=hook)
+        assert "topk_ids" in captured
