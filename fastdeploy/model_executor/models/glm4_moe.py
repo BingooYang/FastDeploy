@@ -17,8 +17,9 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from functools import partial
-from typing import Dict
+from typing import Dict, Optional
 
 import paddle
 from paddle import nn
@@ -35,6 +36,9 @@ from fastdeploy.model_executor.graph_optimization.decorator import (
 from fastdeploy.model_executor.layers.activation import SiluAndMul
 from fastdeploy.model_executor.layers.attention.attention import Attention
 from fastdeploy.model_executor.layers.embeddings import VocabParallelEmbedding
+from fastdeploy.model_executor.layers.flashinfer_comm_fusion import (
+    flashinfer_moe_finalize_allreduce_residual_rmsnorm,
+)
 from fastdeploy.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     MergedReplicatedLinear,
@@ -116,6 +120,20 @@ class Glm4MoeMLP(nn.Layer):
         act_out = self.act_fn(gate_up_out)
         down_out = self.down_proj(act_out)
         return down_out
+
+
+@dataclass
+class _DeferredMoEBundle:
+    """Carries pre-finalize MoE intermediates from Glm4Moe.forward to the next
+    decoder layer's input_layernorm, where flashinfer's
+    kMoEFinalizeARResidualRMSNorm kernel will fuse:
+        finalize(unpermute + topk-weight) + (+shared_out) + AllReduce + residual + RMSNorm.
+    """
+
+    ffn_out: paddle.Tensor  # [num_permuted_rows, hidden]
+    expanded_idx_to_permuted_idx: paddle.Tensor  # int32 [N, top_k]
+    topk_weights: paddle.Tensor  # [N, top_k]
+    shared_expert_output: Optional[paddle.Tensor]  # [N, hidden] or None
 
 
 class Glm4Moe(nn.Layer):
@@ -200,7 +218,28 @@ class Glm4Moe(nn.Layer):
             )
 
     def forward(self, x, forward_meta: ForwardMeta = None):
+        # Decide whether to defer the MoE finalize so the next layer's
+        # input_layernorm can fuse it via kMoEFinalizeARResidualRMSNorm.
+        # Conditions:
+        #   - pure-TP MoE path (merge_ffn_tp)
+        #   - flashinfer all-reduce fusion enabled (and not last layer)
+        #   - workspace token budget respected
+        defer_finalize = self.merge_ffn_tp and self.enable_all_reduce_fusion and x.shape[0] <= 2048
+        self.experts.defer_finalize = defer_finalize
+
         out = self.experts(x, self.gate, forward_meta)
+
+        if isinstance(out, tuple):
+            # Deferred path: experts returned (ffn_out, perm_idx, topk_idx, topk_weights)
+            ffn_out, permute_indices_per_token, _topk_idx, topk_weights = out
+            shared_out = self.shared_experts(x) if self.n_shared_experts > 0 else None
+            return _DeferredMoEBundle(
+                ffn_out=ffn_out,
+                expanded_idx_to_permuted_idx=permute_indices_per_token,
+                topk_weights=topk_weights,
+                shared_expert_output=shared_out,
+            )
+
         if self.n_shared_experts > 0:
             out = out + self.shared_experts(x)
         if self.merge_ffn_tp:
@@ -292,6 +331,7 @@ class Glm4MoeDecoderLayer(nn.Layer):
     ) -> None:
         super().__init__()
 
+        self.fd_config = fd_config
         layer_id = int(prefix.split(sep=".")[-1])
         self.self_attn = Glm4MoeAttention(
             fd_config=fd_config,
@@ -337,9 +377,28 @@ class Glm4MoeDecoderLayer(nn.Layer):
 
         proxy_rmsnorm = rms_norm_func if fastdeploy.envs.FD_USE_PHI_RMSNORM else None
 
-        hidden_states, residual = self.input_layernorm(
-            hidden_states, residual_input=residual, forward_meta=forward_meta, proxy_rmsnorm=proxy_rmsnorm
-        )
+        if isinstance(hidden_states, _DeferredMoEBundle):
+            # Previous layer deferred MoE finalize. Run the fused
+            # kMoEFinalizeARResidualRMSNorm kernel here, replacing input_layernorm.
+            bundle = hidden_states
+            norm_out, residual_out = flashinfer_moe_finalize_allreduce_residual_rmsnorm(
+                fd_config=self.fd_config,
+                allreduce_in=bundle.ffn_out,
+                residual=residual,
+                weight=self.input_layernorm.weight,
+                expanded_idx_to_permuted_idx=bundle.expanded_idx_to_permuted_idx,
+                topk_weights=bundle.topk_weights,
+                shared_expert_output=bundle.shared_expert_output,
+                routed_scaling_factor=None,
+                eps=self.input_layernorm.eps,
+            )
+            assert norm_out is not None, "kMoEFinalizeARResidualRMSNorm fusion failed!"
+            hidden_states = norm_out
+            residual = residual_out
+        else:
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual_input=residual, forward_meta=forward_meta, proxy_rmsnorm=proxy_rmsnorm
+            )
 
         hidden_states = self.self_attn(
             hidden_states=hidden_states,

@@ -203,6 +203,97 @@ def flashinfer_allreduce_residual_rmsnorm(
     return norm_out, residual_out
 
 
+def flashinfer_moe_finalize_allreduce_residual_rmsnorm(
+    fd_config: FDConfig,
+    allreduce_in: paddle.Tensor,
+    residual: paddle.Tensor,
+    weight: paddle.Tensor,
+    expanded_idx_to_permuted_idx: paddle.Tensor,
+    topk_weights: Optional[paddle.Tensor] = None,
+    shared_expert_output: Optional[paddle.Tensor] = None,
+    routed_scaling_factor: Optional[float] = None,
+    weight_bias: Optional[float] = None,
+    eps: float = 1e-6,
+    max_token_num: int = 2048,
+) -> Tuple[paddle.Tensor, paddle.Tensor]:
+    """
+    Use FlashInfer's fused MoE finalize + allreduce + residual + RMS norm operation
+    (kMoEFinalizeARResidualRMSNorm pattern).
+
+    The kernel reads expert outputs from ``allreduce_in`` indirectly via
+    ``expanded_idx_to_permuted_idx`` (an int32 ``[num_tokens, top_k]`` tensor mapping
+    each (token, k)-th expert slot to its permuted row in ``allreduce_in``), applies
+    optional ``topk_weights`` (``expert_scale_factor``) and ``routed_scaling_factor``,
+    optionally adds ``shared_expert_output``, then performs allreduce + residual add
+    + RMSNorm in a single kernel.
+
+    Args:
+        allreduce_in: permuted FFN output, ``[num_permuted_rows, hidden_dim]``.
+        residual: residual stream, ``[num_tokens, hidden_dim]``.
+        weight: RMSNorm gamma, ``[hidden_dim]``.
+        expanded_idx_to_permuted_idx: ``[num_tokens, top_k]`` int32 mapping.
+        topk_weights: ``[num_tokens, top_k]`` float32 weights, optional.
+        shared_expert_output: ``[num_tokens, hidden_dim]`` partial sum, optional.
+        routed_scaling_factor: extra scalar applied per expert weight, optional.
+        weight_bias: bias added to ``weight`` (Gemma/Qwen3.5 style), optional.
+        eps: RMSNorm epsilon.
+        max_token_num: workspace upper bound.
+
+    Returns:
+        ``(norm_out, residual_out)`` if FlashInfer is available and the workspace
+        succeeded; ``(None, None)`` otherwise to allow graceful fallback.
+    """
+    comm = _get_flashinfer_comm()
+    if not has_flashinfer() or comm is None:
+        logger.debug("FlashInfer not available, falling back to standard implementation")
+        return None, None
+
+    assert fd_config is not None
+    world_size = fd_config.parallel_config.tensor_parallel_size
+    if world_size <= 1:
+        logger.debug("Single GPU, no need for moe finalize allreduce fusion")
+        return None, None
+
+    num_tokens, hidden_dim = residual.shape
+    assert num_tokens <= max_token_num
+
+    if not ensure_workspace_initialized(
+        fd_config=fd_config,
+        max_token_num=max_token_num,
+        hidden_dim=hidden_dim,
+        use_fp32_lamport=(residual.dtype == paddle.float32),
+    ):
+        logger.debug("FlashInfer workspace not available")
+        return None, None
+
+    residual_out = paddle.empty_like(residual)
+    norm_out = paddle.empty_like(residual)
+    if num_tokens == 0:
+        return norm_out, residual_out
+
+    comm.trtllm_moe_finalize_allreduce_fusion(
+        allreduce_in=allreduce_in,
+        residual_in=residual,
+        norm_weight=weight,
+        expanded_idx_to_permuted_idx=expanded_idx_to_permuted_idx,
+        norm_out=norm_out,
+        residual_out=residual_out,
+        quant_out=None,
+        scale_out=None,
+        workspace_ptrs=_workspace_manager.workspace_tensor,
+        launch_with_pdl=True,
+        world_rank=dist.get_rank(),
+        world_size=world_size,
+        eps=eps,
+        shared_expert_output=shared_expert_output,
+        expert_scale_factor=topk_weights,
+        routed_scaling_factor=routed_scaling_factor,
+        weight_bias=weight_bias,
+    )
+
+    return norm_out, residual_out
+
+
 def cleanup_flashinfer_workspace():
     global _workspace_manager
     if _workspace_manager is not None:

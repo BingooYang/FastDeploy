@@ -494,6 +494,19 @@ class CutlassMoEMethod(UnquantizedFusedMoEMethod):
             max_tokens_per_expert,
         )
 
+        # When the next layer's input_layernorm is going to perform a fused
+        # MoE-finalize + allreduce + residual + RMSNorm (kMoEFinalizeARResidualRMSNorm),
+        # we must skip moe_expert_reduce here and pass the un-finalized intermediates
+        # through to the consumer. The consumer reads ffn_out indirectly via
+        # permute_indices_per_token (== flashinfer's expanded_idx_to_permuted_idx).
+        if getattr(layer, "defer_finalize", False):
+            return (
+                ffn_out,
+                permute_indices_per_token.astype(paddle.int32),
+                topk_idx,
+                topk_weights,
+            )
+
         # reduce 中会做 topk 个 weight 的 norm 和 routed_scaling_factor
         fused_moe_out = moe_expert_reduce(
             ffn_out,

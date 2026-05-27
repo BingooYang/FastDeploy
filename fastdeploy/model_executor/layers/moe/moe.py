@@ -782,6 +782,14 @@ class FusedMoE(nn.Layer):
                 x, gate, forward_meta, topk_ids_hookfunc=topk_ids_hookfunc, shared_experts=shared_experts
             )
 
+        # Deferred MoE finalize: the cutlass apply_tp path can return a tuple
+        # (ffn_out, permute_indices_per_token, topk_idx, topk_weights) when
+        # `layer.defer_finalize` is True. In that case we must NOT do the
+        # trailing all-reduce here; the consumer (next layer's input_layernorm)
+        # will fuse finalize + AR + residual + RMSNorm into a single kernel.
+        if isinstance(out, tuple):
+            return out
+
         if self.reduce_results and self.tp_size > 1:
             out = tensor_model_parallel_all_reduce(out, self.tp_group)
         return out
